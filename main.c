@@ -11,19 +11,29 @@
 #include <mntent.h>
 #include <getopt.h>
 #include <ctype.h>
+#include <time.h>
 
 #define TRUE 1
 #define FALSE 0
 typedef int BOOL;
 
+typedef enum 
+  {
+  FILL_FIXED = 0,
+  FILL_RANDOM = 1
+  } FillMethod;
+
 /*============================================================================
   fill_pat_buff 
 ============================================================================*/
-void fill_pat_buff (unsigned char *buf, int size)
+void fill_pat_buff (unsigned char *buf, int size, FillMethod m)
  {
  for (int i = 0; i < size; i++)
    {
-   buf[i] = (unsigned char) (i & 0xFF); 
+   if (m == FILL_FIXED)
+     buf[i] = (unsigned char) (i & 0xFF); 
+   else
+     buf[i] = (unsigned char) (rand() & 0xFF); 
    }
  }
 
@@ -82,6 +92,10 @@ void show_help (const char *argv0)
   {
   printf ("%s [options] {block_device}\n", argv0);
   printf ("  -f, --force            skip all safety checks\n"); 
+  printf ("  -h, --help             show this text\n"); 
+  printf ("  -r, --random           write randomized data\n"); 
+  printf ("  -v, --version          show version\n"); 
+  printf ("  -w, --wipeonly         wipe only, don't test\n"); 
   }
 
 /*============================================================================
@@ -102,25 +116,32 @@ int main (int argc, char **argv)
   BOOL switch_help = FALSE;
   BOOL switch_force = FALSE;
   BOOL switch_version = FALSE;
+  BOOL switch_random = FALSE;
+  BOOL switch_wipe_only = FALSE;
+  FillMethod fill_method = FILL_FIXED;
 
   static struct option long_options[] =
     {
       {"help", no_argument, NULL, 'h'},
       {"force", no_argument, NULL, 'f'},
+      {"random", no_argument, NULL, 'r'},
       {"version", no_argument, NULL, 'v'},
+      {"wipeonly", no_argument, NULL, 'w'},
     };
 
   int ret = 0;
   while (ret == 0)
     {
     int option_index = 0;
-    int opt = getopt_long (argc, argv, "fhv", long_options, &option_index);
+    int opt = getopt_long (argc, argv, "fhrvw", long_options, &option_index);
     if (opt < 0) break;
     switch (opt)
       {
       case 'h': switch_help = TRUE; break;
       case 'f': switch_force = TRUE; break;
+      case 'r': switch_random = TRUE; break;
       case 'v': switch_version = TRUE;  break;
+      case 'w': switch_wipe_only = TRUE;  break;
       default: ret = 1;
       }
     }
@@ -138,6 +159,8 @@ int main (int argc, char **argv)
     show_version();
     exit (0);
     }
+
+  if (switch_random) fill_method = FILL_RANDOM;
 
   if (argc - optind != 1)
     {
@@ -180,7 +203,9 @@ int main (int argc, char **argv)
       printf ("Number of blocks: %d\n", numblocks);
       unsigned char *pat_buff_out = aligned_alloc ((size_t)blksize, (size_t)blksize);
       unsigned char *pat_buff_ref = aligned_alloc ((size_t)blksize, (size_t)blksize);
-      fill_pat_buff (pat_buff_out, (int)blksize);
+      long seed = time (NULL);
+      srand ((unsigned int)seed);
+      fill_pat_buff (pat_buff_out, (int)blksize, fill_method);
       memcpy (pat_buff_ref, pat_buff_out, (size_t)blksize);
       //print_pat_buff (pat_buff_out, (int)blksize);
     
@@ -209,44 +234,66 @@ int main (int argc, char **argv)
           failed = TRUE;
           }
         offset += blksize;
+        if (fill_method != FILL_FIXED)
+          {
+          fill_pat_buff (pat_buff_out, (int)blksize, fill_method);
+          memcpy (pat_buff_ref, pat_buff_out, (size_t)blksize);
+          }
         }
 
       printf ("\n");
-      offset = 0;
-      printf ("Pass two: reading...\n");
-      for (unsigned int i = 0; i < numblocks && !failed; i++)
+
+      if (!switch_wipe_only)
         {
-        if (lseek (f, offset, SEEK_SET) == offset)
-          {
-          if (i % 4096 == 0 || i == numblocks - 1)
-            {
-            printf ("Reading block %ld\r", (long)i);
-            fflush (stdout);
-            }
-          if (read (f, pat_buff_out, (size_t)blksize) == blksize)
-            {
-            if (memcmp (pat_buff_out, pat_buff_ref, (size_t)blksize) != 0)
-              {
-              fprintf (stderr, "Incorrect pattern read at block %u\n", i);
-              }
-            }
-          else
-            {
-            fprintf (stderr, "Read failed at block %u: %s\n", 
-              i, strerror(errno));
-            failed = TRUE;
-            }
-          }
-        else
-          {
-          fprintf (stderr, "Seek failed at block %u: %s\n", i, strerror(errno));
-          failed = TRUE;
-          }
-        offset += blksize;
+	srand ((unsigned int)seed);
+	fill_pat_buff (pat_buff_out, (int)blksize, fill_method);
+	memcpy (pat_buff_ref, pat_buff_out, (size_t)blksize);
+	offset = 0;
+	printf ("Pass two: reading...\n");
+	for (unsigned int i = 0; i < numblocks && !failed; i++)
+	  {
+	  if (lseek (f, offset, SEEK_SET) == offset)
+	    {
+	    if (i % 4096 == 0 || i == numblocks - 1)
+	      {
+	      printf ("Reading block %ld\r", (long)i);
+	      fflush (stdout);
+	      }
+	    if (read (f, pat_buff_out, (size_t)blksize) == blksize)
+	      {
+	      if (memcmp (pat_buff_out, pat_buff_ref, (size_t)blksize) != 0)
+		{
+		fprintf (stderr, "Incorrect pattern read at block %u\n", i);
+		}
+	      }
+	    else
+	      {
+	      fprintf (stderr, "Read failed at block %u: %s\n", 
+		i, strerror(errno));
+	      failed = TRUE;
+	      }
+	    }
+	  else
+	    {
+	    fprintf (stderr, "Seek failed at block %u: %s\n", i, strerror(errno));
+	    failed = TRUE;
+	    }
+	  offset += blksize;
+	  if (fill_method != FILL_FIXED) 
+	    {
+	    fill_pat_buff (pat_buff_out, (int)blksize, fill_method);
+	    memcpy (pat_buff_ref, pat_buff_out, (size_t)blksize);
+	    }
+	  }
+
+        printf ("\n");
         }
-      printf ("\n");
+
       free (pat_buff_out);
       free (pat_buff_ref);
+
+      printf ("Synchronizing...\n");
+      sync();
 
       if (failed)
         {
